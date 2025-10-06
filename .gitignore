@@ -1,0 +1,4 @@
+/data
+/scripts/*
+!/scripts/export-movie-reviews.ts
+
