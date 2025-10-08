@@ -17,8 +17,8 @@ import fs from "fs";
 import path from "path";
 
 // ----------------- CONFIG -----------------
-const START_YEAR = 2016;
-const END_YEAR = 2025; // inclusive
+const START_YEAR = 2015;
+const END_YEAR = 2026; // inclusive
 const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
 
 const MAX_LIST_PAGES = 80;
@@ -263,32 +263,70 @@ async function collectMovieUrlsForYear(page: Page, year: number): Promise<string
   return urls;
 }
 
-// ----------------- DETAIL (title + metascore + release year) -----------------
 function extractYearFromLdObject(obj: any): number | null {
   const preferredKeys = [
-    "datePublished", "releaseDate", "startDate",
-    "dateCreated", "uploadDate", "copyrightYear", "productionYear", "year",
+    "datePublished",
+    "releaseDate",
+    "startDate",
+    "dateCreated",
+    "copyrightYear",
+    "productionYear",
+    "year",
   ];
-  const years: number[] = [];
-  const pushYear = (val: any) => {
-    if (typeof val === "number" && val >= 1900 && val <= 2100) { years.push(val); return; }
+
+  // Helper: extract a year only if the value looks like a proper date or year
+  const extractYear = (val: any): number | null => {
+    if (typeof val === "number" && val >= 1900 && val <= 2100) return val;
     if (typeof val === "string") {
-      const m = val.match(/\b(19\d{2}|20\d{2})\b/);
-      if (m) years.push(parseInt(m[1], 10));
+      // Accept ISO-like or YYYY strings only (reject plain text like “Since 2010”)
+      const m = val.match(/\b(19\d{2}|20\d{2})(?:[-T\/]|$)/);
+      if (m) {
+        const y = parseInt(m[1], 10);
+        if (y >= 1900 && y <= 2100) return y;
+      }
     }
+    return null;
   };
-  const visit = (x: any) => {
-    if (!x || typeof x !== "object") return;
-    for (const k of preferredKeys) if (k in x) pushYear((x as any)[k]);
-    for (const v of Object.values(x)) {
-      if (v && typeof v === "object") visit(v);
-      else pushYear(v);
+
+  // (1) Priority search: return the first valid year found by semantic key order
+  for (const key of preferredKeys) {
+    const year = (() => {
+      const v = (obj as any)[key];
+      if (v == null) return null;
+      if (Array.isArray(v)) {
+        for (const item of v) {
+          const y = extractYear(item);
+          if (y != null) return y;
+        }
+      } else if (typeof v === "object") {
+        for (const vv of Object.values(v)) {
+          const y = extractYear(vv);
+          if (y != null) return y;
+        }
+      } else {
+        const y = extractYear(v);
+        if (y != null) return y;
+      }
+      return null;
+    })();
+    if (year != null) return year;
+  }
+
+  // (2) Recursive search through nested objects, but skip excluded fields.
+  // We skip "description" because it often contains large text blobs or story text
+  // that may include unrelated years (e.g., “Since 2010...”), which could cause
+  // false positives or performance issues during year extraction.
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.toLowerCase() === "description") continue;
+    if (v && typeof v === "object") {
+      const y = extractYearFromLdObject(v);
+      if (y != null) return y;
     }
-  };
-  visit(obj);
-  const valid = years.filter((y) => y >= 1900 && y <= 2100);
-  return valid.length ? Math.min(...valid) : null;
+  }
+
+  return null;
 }
+
 
 async function readDetails(
   api: APIRequestContext,
