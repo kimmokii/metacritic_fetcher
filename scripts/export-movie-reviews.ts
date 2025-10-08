@@ -1,6 +1,6 @@
 // scripts/export-movie-reviews.ts
 // Metacritic movie scraper — Playwright (DOM + infinite scroll, unique-driven stop)
-// - Years: 2023 … 2025 (separate CSV per year)
+// - Years: 2014 … 2025 (separate CSV per year)
 // - Collect ALL movies per year (filtered by the movie's real release year from JSON-LD)
 // - Detail: title + metascore + releaseYear via BrowserContext.request (shares cookies)
 // - Reviews: rendered DOM, infinite-scroll aware, harvest EVERY iteration,
@@ -97,7 +97,7 @@ function normalizeWhitespace(s: string) {
 
 // ---------- AUTHOR & PUBLICATION PARSERS (patched) ----------
 
-// Poista "By ", zero-width-merkit ja disambiguointi kuten " (1)"
+// Remove "By ", zero-width and disambiguities like " (1)"
 function cleanupAuthor(raw: string) {
   let s = normalizeWhitespace(raw).replace(/^by\s+/i, "");
   s = s.replace(/[\u200B-\u200D\uFEFF]/g, "");  // zero-width
@@ -105,7 +105,7 @@ function cleanupAuthor(raw: string) {
   return s;
 }
 
-// Tunnista kaikki “Staff”-variantit ja normalisoi
+// Identify all “Staff”-variants and normalize
 function detectStaffAuthor(raw: string): string | null {
   const s = cleanupAuthor(raw);
   if (!s) return null;
@@ -123,12 +123,12 @@ function detectStaffAuthor(raw: string): string | null {
   return "Staff";
 }
 
-// Unicode-nimien tunnistin (hyväksyy O’Brien, Michał, yms.)
+// Unicode-like name identifies (accepts O’Brien, Michał, etc.)
 function isLikelyPersonName(s: string) {
   const t = cleanupAuthor(s);
   if (!t) return false;
   if (t.length > 80) return false;
-  if (/[!?,"“”‘’]/u.test(t)) return false; // lausemainen
+  if (/[!?,"“”‘’]/u.test(t)) return false; // sentence-like
 
   const particles = new Set([
     "de","del","della","der","van","von","da","dos","di","la","le","el","al","du","of"
@@ -142,8 +142,8 @@ function isLikelyPersonName(s: string) {
     const lw = w.toLowerCase();
     if (particles.has(lw)) continue;
     if (/^[\p{Lu}]\.$/u.test(w)) { hasCore = true; continue; }                  // "G."
-    if (/^(Jr\.|Sr\.|II|III|IV|V|Ph\.D\.|M\.D\.)$/iu.test(w)) continue;         // suffixit
-    if (/^[\p{Lu}][\p{L}'’.-]*$/u.test(w)) { hasCore = true; continue; }        // pääsana
+    if (/^(Jr\.|Sr\.|II|III|IV|V|Ph\.D\.|M\.D\.)$/iu.test(w)) continue;         // suffixes
+    if (/^[\p{Lu}][\p{L}'’.-]*$/u.test(w)) { hasCore = true; continue; }        // main word
     return false;
   }
   return hasCore;
@@ -161,7 +161,7 @@ async function extractAuthorFromCard(card: Locator): Promise<string> {
     '.review_author',
   ];
 
-  // 1) Strukturoidut selektorit
+  // 1) Structured selectors
   for (const sel of selectors) {
     try {
       const node = card.locator(sel).first();
@@ -190,10 +190,10 @@ async function extractAuthorFromCard(card: Locator): Promise<string> {
   return "";
 }
 
-// Julkaisun (lehti/medialähde) tunnistus – tukee uusia ja legacy-luokkia
+// Publication (magazine/media source) identification – supports both new and legacy classes
 async function extractPublicationFromCard(card: Locator): Promise<string> {
   const selectors = [
-    // Uudempi UI
+    // Newer UI
     '.c-siteReviewHeader_publicationName a',
     '.c-siteReviewHeader_publicationName',
     '.c-siteReviewHeader_publisherLogo a',
@@ -215,7 +215,7 @@ async function extractPublicationFromCard(card: Locator): Promise<string> {
     } catch {}
   }
 
-  // Fallback: headerista ensimmäinen järkevä teksti/linkki
+  // Fallback: the first meaningful text/link from the header
   try {
     const header = card.locator('.c-siteReviewHeader, .review_header, header').first();
     if (await header.isVisible().catch(() => false)) {
