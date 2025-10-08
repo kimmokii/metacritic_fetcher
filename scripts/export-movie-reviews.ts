@@ -18,7 +18,7 @@ import path from "path";
 
 // ----------------- CONFIG -----------------
 const START_YEAR = 2014;
-const END_YEAR = 2014; // inclusive
+const END_YEAR = 2026; // inclusive
 const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
 
 const MAX_LIST_PAGES = 80;
@@ -26,7 +26,7 @@ const LIST_DELAY_MS = 100;
 
 const MAX_REVIEW_STEPS = 60;        // max scroll/click iterations per movie
 const MAX_STAGNANT_ITERS = 8;       // stop if no new uniques for this many iterations
-const AFTER_CLICK_WAIT_MS = 500;
+const AFTER_CLICK_WAIT_MS = 100;
 const SCROLL_WAIT_MS = 150;
 const NETWORK_IDLE_TIMEOUT = 1000;
 
@@ -278,7 +278,10 @@ function extractYearFromLdObject(obj: any): number | null {
   const visit = (x: any) => {
     if (!x || typeof x !== "object") return;
     for (const k of preferredKeys) if (k in x) pushYear((x as any)[k]);
-    for (const v of Object.values(x)) (v && typeof v === "object") ? visit(v) : pushYear(v);
+    for (const v of Object.values(x)) {
+      if (v && typeof v === "object") visit(v);
+      else pushYear(v);
+}
   };
   visit(obj);
   const valid = years.filter((y) => y >= 1900 && y <= 2100);
