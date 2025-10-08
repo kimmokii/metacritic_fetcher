@@ -37,7 +37,7 @@ const UA =
 
 const OUT_DIR = path.join("data", "raw");
 const perYearCsv = (year: number) => path.join(OUT_DIR, `metacritic_movies_${year}.csv`);
-// NEW: mismatcheille oma CSV
+//  Own CSV file for mismatches
 const perYearMismatchCsv = (year: number) =>
   path.join(OUT_DIR, `metacritic_movies_skipped_mismatch_${year}.csv`);
 
@@ -545,14 +545,14 @@ async function run() {
     const outPath = perYearCsv(year);
     const mismatchPath = perYearMismatchCsv(year); // NEW
 
-    // Pää-CSV:n otsikko
+    // Main CSV title
     fs.writeFileSync(
       outPath,
       toCsv(["movie_title", "release_year", "metascore", "critic_publication", "critic_author", "critic_score"]) + "\n",
       "utf8"
     );
 
-    // Mismatch-CSV:n otsikko
+    // Mismatch CSV title
     fs.writeFileSync(
       mismatchPath,
       toCsv(["movie_title", "release_year", "loop_year", "metascore", "url"]) + "\n",
@@ -574,7 +574,7 @@ async function run() {
       return { url: u, ...d };
     });
 
-    // Kirjaa mismatchit CSV:hen
+    // Write mismatches to CSV
     const mismatches = details.filter(
       (d) => d.title && d.releaseYear != null && d.releaseYear !== year
     );
@@ -585,7 +585,7 @@ async function run() {
       );
     }
 
-    // Suodata loop-vuodelle kuuluvat
+    // Filter movies belonging to loop-year
     const pool = details.filter((d) => d.title && d.releaseYear === year);
     const skipped = mismatches.length;
     const unknown = details.filter((d) => d.title && d.releaseYear == null).length;
