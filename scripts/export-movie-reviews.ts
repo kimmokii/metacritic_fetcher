@@ -17,8 +17,8 @@ import fs from "fs";
 import path from "path";
 
 // ----------------- CONFIG -----------------
-const START_YEAR = 2014;
-const END_YEAR = 2026; // inclusive
+const START_YEAR = 2016;
+const END_YEAR = 2025; // inclusive
 const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
 
 const MAX_LIST_PAGES = 80;
@@ -26,18 +26,20 @@ const LIST_DELAY_MS = 100;
 
 const MAX_REVIEW_STEPS = 60;        // max scroll/click iterations per movie
 const MAX_STAGNANT_ITERS = 8;       // stop if no new uniques for this many iterations
-const AFTER_CLICK_WAIT_MS = 100;
 const SCROLL_WAIT_MS = 150;
 const NETWORK_IDLE_TIMEOUT = 1000;
 
-const DETAIL_CONCURRENCY = 9;
-const REVIEW_CONCURRENCY = 4;
+const DETAIL_CONCURRENCY = 25;
+const REVIEW_CONCURRENCY = 8;
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 const OUT_DIR = path.join("data", "raw");
 const perYearCsv = (year: number) => path.join(OUT_DIR, `metacritic_movies_${year}.csv`);
+// NEW: mismatcheille oma CSV
+const perYearMismatchCsv = (year: number) =>
+  path.join(OUT_DIR, `metacritic_movies_skipped_mismatch_${year}.csv`);
 
 // ----------------- HELPERS -----------------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -281,7 +283,7 @@ function extractYearFromLdObject(obj: any): number | null {
     for (const v of Object.values(x)) {
       if (v && typeof v === "object") visit(v);
       else pushYear(v);
-}
+    }
   };
   visit(obj);
   const valid = years.filter((y) => y >= 1900 && y <= 2100);
@@ -496,29 +498,19 @@ async function getAllCriticReviewsViaDom(page: Page, movieUrl: string) {
     if (deltaUnique > 0) {
       stagnantUniqueIters = 0; // progress!
     } else {
+      // ---- PATCH: remove "Load more" -button. Try deep-scrolling, which ends when stagnation limit is reached. ----
       stagnantUniqueIters++;
-      const MORE_SELECTORS = [
-        'button:has-text("Load more")',
-        'button:has-text("Show more")',
-        'button:has-text("More")',
-        'a:has-text("Next")',
-        'a[rel="next"]',
-        '[data-testid="load-more"]',
-      ];
-      let clicked = false;
-      for (const sel of MORE_SELECTORS) {
-        const el = page.locator(sel).first();
-        if (await el.isVisible().catch(() => false)) {
-          try { await el.click(); clicked = true; break; } catch {}
-        }
-      }
-      if (clicked) {
-        await jitter(AFTER_CLICK_WAIT_MS);
-        await page.waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT }).catch(() => {});
-        await harvest();
-        stagnantUniqueIters = 0;
-      }
+
+      // try once more to ensure we are at the end of page.
+      try { await page.locator(CARD_SEL).last().scrollIntoViewIfNeeded({ timeout: 500 }).catch(() => {}); } catch {}
+      await scrollReviewsContainer(page);
+      try { await page.keyboard.press("End"); } catch {}
+      await jitter(SCROLL_WAIT_MS);
+      await page.waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT }).catch(() => {});
+      await harvest();
+
       if (stagnantUniqueIters >= MAX_STAGNANT_ITERS) break;
+      // ---- END PATCH ----
     }
   }
 
@@ -551,9 +543,19 @@ async function run() {
 
   for (const year of YEARS) {
     const outPath = perYearCsv(year);
+    const mismatchPath = perYearMismatchCsv(year); // NEW
+
+    // Pää-CSV:n otsikko
     fs.writeFileSync(
       outPath,
       toCsv(["movie_title", "release_year", "metascore", "critic_publication", "critic_author", "critic_score"]) + "\n",
+      "utf8"
+    );
+
+    // Mismatch-CSV:n otsikko
+    fs.writeFileSync(
+      mismatchPath,
+      toCsv(["movie_title", "release_year", "loop_year", "metascore", "url"]) + "\n",
       "utf8"
     );
 
@@ -572,12 +574,27 @@ async function run() {
       return { url: u, ...d };
     });
 
-    // Filter to those whose releaseYear matches the loop year
+    // Kirjaa mismatchit CSV:hen
+    const mismatches = details.filter(
+      (d) => d.title && d.releaseYear != null && d.releaseYear !== year
+    );
+    for (const m of mismatches) {
+      fs.appendFileSync(
+        mismatchPath,
+        toCsv([m.title, m.releaseYear ?? "", year, m.metascore ?? "", m.url]) + "\n"
+      );
+    }
+
+    // Suodata loop-vuodelle kuuluvat
     const pool = details.filter((d) => d.title && d.releaseYear === year);
-    const skipped = details.filter((d) => d.title && d.releaseYear != null && d.releaseYear !== year).length;
+    const skipped = mismatches.length;
     const unknown = details.filter((d) => d.title && d.releaseYear == null).length;
 
-    console.log(`\nIndexed ${pool.length} movies for ${year} (skipped ${skipped} mismatch, ${unknown} unknown year)`);
+    console.log(
+      `\nIndexed ${pool.length} movies for ${year} (skipped ${skipped} mismatch → ${path.basename(
+        mismatchPath
+      )}, ${unknown} unknown year)`
+    );
 
     // Reviews (DOM) — small concurrency
     await mapLimit(pool, REVIEW_CONCURRENCY, async (m, idx) => {
