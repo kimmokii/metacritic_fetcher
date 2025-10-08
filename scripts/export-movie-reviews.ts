@@ -279,7 +279,7 @@ function extractYearFromLdObject(obj: any): number | null {
     if (typeof val === "number" && val >= 1900 && val <= 2100) return val;
     if (typeof val === "string") {
       // Accept ISO-like or YYYY strings only (reject plain text like “Since 2010”)
-      const m = val.match(/\b(19\d{2}|20\d{2})(?:[-T]|$)/);
+      const m = val.match(/\b(19\d{2}|20\d{2})(?:[-T\/]|$)/);
       if (m) {
         const y = parseInt(m[1], 10);
         if (y >= 1900 && y <= 2100) return y;
