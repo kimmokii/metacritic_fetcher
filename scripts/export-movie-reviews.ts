@@ -5,14 +5,11 @@
 // - Detail: title + metascore + releaseYear via BrowserContext.request (shares cookies)
 // - Reviews: rendered DOM, infinite-scroll aware, harvest EVERY iteration,
 //            stop when unique rows stop increasing or "Showing N Critic Reviews" is reached.
-// RUN BY EXECUTING npx tsx scripts/export-movie-reviews.ts
-
 
 import {
   chromium,
   Browser,
   Page,
-  BrowserContext,
   APIRequestContext,
   Locator,
 } from "playwright";
@@ -20,8 +17,8 @@ import fs from "fs";
 import path from "path";
 
 // ----------------- CONFIG -----------------
-const START_YEAR = 2015;
-const END_YEAR = 2022; // inclusive
+const START_YEAR = 2014;
+const END_YEAR = 2014; // inclusive
 const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
 
 const MAX_LIST_PAGES = 80;
@@ -29,7 +26,7 @@ const LIST_DELAY_MS = 100;
 
 const MAX_REVIEW_STEPS = 60;        // max scroll/click iterations per movie
 const MAX_STAGNANT_ITERS = 8;       // stop if no new uniques for this many iterations
-const AFTER_CLICK_WAIT_MS = 100;
+const AFTER_CLICK_WAIT_MS = 500;
 const SCROLL_WAIT_MS = 150;
 const NETWORK_IDLE_TIMEOUT = 1000;
 
@@ -98,48 +95,61 @@ function normalizeWhitespace(s: string) {
   return (s ?? "").replace(/\s+/g, " ").trim();
 }
 
-// Poista "By", "By:", "By —/–", "Byline", "Review by", "Written by" yms. authorin alusta
-function sanitizeAuthor(raw: string) {
-  let t = normalizeWhitespace(raw);
-  t = t.replace(/^\s*(?:by|byline|review\s+by|written\s+by)\s*[:–—-]?\s+/i, "");
-  t = t.replace(/^[,:;–—-]\s*/, ""); // mahdollinen roikkuva välimerkki
-  return t.trim();
+// ---------- AUTHOR & PUBLICATION PARSERS (patched) ----------
+
+// Poista "By ", zero-width-merkit ja disambiguointi kuten " (1)"
+function cleanupAuthor(raw: string) {
+  let s = normalizeWhitespace(raw).replace(/^by\s+/i, "");
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, "");  // zero-width
+  s = s.replace(/\s*\((\d+)\)\s*$/u, "");       // "Chris Hewitt (1)" -> "Chris Hewitt"
+  return s;
 }
 
-// Heuristics for a human name.
-// - Allows initials with dots (e.g., "J.", "G.", "R.R.")
-// - Allows lowercase particles (van, de, von, da, del, ...)
-// - Allows apostrophes and hyphens (O'Connor, Mary-Louise)
-// - Allows common suffixes (Jr., Sr., II, III, IV, Ph.D., M.D.)
-// - Rejects sentence-like strings (quotes/!/?)
+// Tunnista kaikki “Staff”-variantit ja normalisoi
+function detectStaffAuthor(raw: string): string | null {
+  const s = cleanupAuthor(raw);
+  if (!s) return null;
+
+  let t = s.toLowerCase();
+  t = t.replace(/[\[\]\(\)\{\}]/g, " ");
+  t = t.replace(/[^a-z\s-]/g, " ");
+  t = t.replace(/\s+/g, " ").trim();
+
+  if (!/\bstaff\b/.test(t)) return null;
+
+  if (/\bnot\s*-?\s*credited\b/.test(t) || /\buncredited\b/.test(t)) {
+    return "Staff [Not Credited]";
+  }
+  return "Staff";
+}
+
+// Unicode-nimien tunnistin (hyväksyy O’Brien, Michał, yms.)
 function isLikelyPersonName(s: string) {
-  const t = sanitizeAuthor(s);
+  const t = cleanupAuthor(s);
   if (!t) return false;
   if (t.length > 80) return false;
-  if (/[!?,"“”‘’]/.test(t)) return false; // lause/quote, ei nimi
+  if (/[!?,"“”‘’]/u.test(t)) return false; // lausemainen
 
   const particles = new Set([
-    "de","del","della","der","van","von","da","dos","di","la","le","el","al","du"
+    "de","del","della","der","van","von","da","dos","di","la","le","el","al","du","of"
   ]);
 
   const tokens = t.split(/\s+/);
   if (tokens.length < 1 || tokens.length > 8) return false;
 
   let hasCore = false;
-  for (const wRaw of tokens) {
-    const w = wRaw.trim();
+  for (const w of tokens) {
     const lw = w.toLowerCase();
-    if (particles.has(lw)) continue;                               // sallitut välikkeet
-    if (/^[A-Z]\.$/.test(w)) { hasCore = true; continue; }         // alkukirjain "G."
-    if (/^(Jr\.|Sr\.|II|III|IV|V|Ph\.D\.|M\.D\.)$/i.test(w)) continue; // suffiksit
-    if (/^[A-ZÀ-ÖØ-ÝÅÄÖ][A-Za-zÀ-ÖØ-öø-ÿ'.-]*$/.test(w)) { hasCore = true; continue; }
-    return false; // ei näytä nimeltä
+    if (particles.has(lw)) continue;
+    if (/^[\p{Lu}]\.$/u.test(w)) { hasCore = true; continue; }                  // "G."
+    if (/^(Jr\.|Sr\.|II|III|IV|V|Ph\.D\.|M\.D\.)$/iu.test(w)) continue;         // suffixit
+    if (/^[\p{Lu}][\p{L}'’.-]*$/u.test(w)) { hasCore = true; continue; }        // pääsana
+    return false;
   }
   return hasCore;
 }
 
 async function extractAuthorFromCard(card: Locator): Promise<string> {
-  // 1) Rakenteiset author-selektorit
   const selectors = [
     '.c-siteReviewHeader_author a',
     '.c-siteReviewHeader_author',
@@ -150,26 +160,74 @@ async function extractAuthorFromCard(card: Locator): Promise<string> {
     'span.author',
     '.review_author',
   ];
+
+  // 1) Strukturoidut selektorit
   for (const sel of selectors) {
     try {
       const node = card.locator(sel).first();
       if (await node.isVisible().catch(() => false)) {
-        const cand = sanitizeAuthor(await node.innerText());
+        const raw = await node.innerText();
+        const staff = detectStaffAuthor(raw);
+        if (staff) return staff;
+        const cand = cleanupAuthor(raw);
         if (isLikelyPersonName(cand)) return cand;
       }
     } catch {}
   }
 
-  // 2) Tiukka "By <Name>" -fallback (välttää "By far..." yms.)
+  // 2) "By <Name>" -fallback
   try {
     const byNode = card.locator('text=/^\\s*By\\s+/i').first();
     if (await byNode.isVisible().catch(() => false)) {
-      const afterBy = sanitizeAuthor(await byNode.innerText());
-      if (isLikelyPersonName(afterBy)) return afterBy;
+      const raw = await byNode.innerText();
+      const staff = detectStaffAuthor(raw);
+      if (staff) return staff;
+      const cand = cleanupAuthor(raw);
+      if (isLikelyPersonName(cand)) return cand;
     }
   } catch {}
 
-  // 3) Ei authoria
+  return "";
+}
+
+// Julkaisun (lehti/medialähde) tunnistus – tukee uusia ja legacy-luokkia
+async function extractPublicationFromCard(card: Locator): Promise<string> {
+  const selectors = [
+    // Uudempi UI
+    '.c-siteReviewHeader_publicationName a',
+    '.c-siteReviewHeader_publicationName',
+    '.c-siteReviewHeader_publisherLogo a',
+    '[data-testid="review-source"]',
+    '.c-siteReviewHeader_source',
+    'a[href^="/publication/"]',
+    // Legacy / generic
+    '.publication',
+    '.source',
+  ];
+
+  for (const sel of selectors) {
+    try {
+      const node = card.locator(sel).first();
+      if (await node.isVisible().catch(() => false)) {
+        const txt = normalizeWhitespace(await node.innerText());
+        if (txt) return txt;
+      }
+    } catch {}
+  }
+
+  // Fallback: headerista ensimmäinen järkevä teksti/linkki
+  try {
+    const header = card.locator('.c-siteReviewHeader, .review_header, header').first();
+    if (await header.isVisible().catch(() => false)) {
+      const texts = await header.locator('a, span, div').allInnerTexts();
+      for (const raw of texts) {
+        const t = normalizeWhitespace(raw);
+        if (!t || /^by\s+/i.test(t) || /metascore/i.test(t)) continue;
+        return t;
+      }
+    }
+  } catch {}
+
   return "";
 }
 
@@ -204,45 +262,32 @@ async function collectMovieUrlsForYear(page: Page, year: number): Promise<string
 }
 
 // ----------------- DETAIL (title + metascore + release year) -----------------
-
-// PATCHED: only take years from release-related keys and choose the one closest to targetYear.
-function extractYearFromLdObject(obj: any, targetYear?: number): number | null {
-  const KEYS = ["datePublished", "releaseDate", "startDate", "copyrightYear", "productionYear", "year"];
+function extractYearFromLdObject(obj: any): number | null {
+  const preferredKeys = [
+    "datePublished", "releaseDate", "startDate",
+    "dateCreated", "uploadDate", "copyrightYear", "productionYear", "year",
+  ];
   const years: number[] = [];
-
-  const pushYear = (v: any) => {
-    if (typeof v === "number" && v >= 1900 && v <= 2100) years.push(v);
-    else if (typeof v === "string") {
-      const m = v.match(/\b(19\d{2}|20\d{2})\b/);
+  const pushYear = (val: any) => {
+    if (typeof val === "number" && val >= 1900 && val <= 2100) { years.push(val); return; }
+    if (typeof val === "string") {
+      const m = val.match(/\b(19\d{2}|20\d{2})\b/);
       if (m) years.push(parseInt(m[1], 10));
     }
   };
-
   const visit = (x: any) => {
     if (!x || typeof x !== "object") return;
-    // only consider the whitelisted keys
-    for (const k of KEYS) if (k in x) pushYear((x as any)[k]);
-    // continue into nested objects/arrays (but don't push arbitrary scalars)
-    for (const v of Object.values(x)) if (v && typeof v === "object") visit(v);
+    for (const k of preferredKeys) if (k in x) pushYear((x as any)[k]);
+    for (const v of Object.values(x)) (v && typeof v === "object") ? visit(v) : pushYear(v);
   };
-
   visit(obj);
-  const uniq = Array.from(new Set(years)).filter((y) => y >= 1900 && y <= 2100);
-  if (uniq.length === 0) return null;
-
-  if (typeof targetYear === "number") {
-    uniq.sort((a, b) => Math.abs(a - targetYear) - Math.abs(b - targetYear));
-  } else {
-    // fallback: prefer the most recent release-related year
-    uniq.sort((a, b) => b - a);
-  }
-  return uniq[0];
+  const valid = years.filter((y) => y >= 1900 && y <= 2100);
+  return valid.length ? Math.min(...valid) : null;
 }
 
 async function readDetails(
   api: APIRequestContext,
-  movieUrl: string,
-  targetYear?: number
+  movieUrl: string
 ): Promise<{ title: string; metascore: number | null; releaseYear: number | null }> {
   let title = "";
   let metascore: number | null = null;
@@ -263,7 +308,6 @@ async function readDetails(
         const tMatch = html.match(/<title[^>]*>(.*?)<\/title>/is);
         if (tMatch) title = cleanTitle(tMatch[1].replace(/ - Metacritic.*/i, ""));
       }
-      // strip trailing "... Reviews" just in case
       if (title) title = title.replace(/\s+Reviews?$/i, "").trim();
 
       // metascore via meta[name="atags"] content="...score=83..."
@@ -285,7 +329,7 @@ async function readDetails(
           const j = JSON.parse(blob);
           const arr = Array.isArray(j) ? j : [j];
           for (const node of arr) {
-            const y = extractYearFromLdObject(node, targetYear);
+            const y = extractYearFromLdObject(node);
             if (y != null) { releaseYear = y; break; }
           }
         } catch {}
@@ -318,13 +362,6 @@ async function readDetails(
   return { title, metascore, releaseYear };
 }
 
-type MovieIndex = {
-  url: string;
-  title: string;
-  metascore: number | null;
-  releaseYear: number | null;
-};
-
 // ----------------- REVIEWS: DOM + infinite scroll (unique-driven) -----------------
 async function scrollReviewsContainer(page: Page) {
   const selCandidates = [
@@ -355,8 +392,19 @@ async function scrollReviewsContainer(page: Page) {
 
 async function getAllCriticReviewsViaDom(page: Page, movieUrl: string) {
   const base = movieUrl.replace(/\/$/, "") + "/critic-reviews";
-  const CARD_SEL =
-    '[data-testid="product-review"], .c-siteReview, div.c-criticReview, li.c-criticReview, li.critic_review, .critic_review';
+  const CARD_SEL = [
+    '[data-testid="product-review"]',
+    '.c-siteReview',
+    'div.c-criticReview',
+    'li.c-criticReview',
+    'li.critic_review',
+    '.critic_review',
+    // legacy / fallback:
+    'div.review',
+    'li.review',
+    'article.review',
+    'section.c-siteReview',
+  ].join(", ");
 
   await page.goto(base, { waitUntil: "domcontentloaded" });
   await acceptCookies(page);
@@ -376,21 +424,8 @@ async function getAllCriticReviewsViaDom(page: Page, movieUrl: string) {
   const harvest = async () => {
     const cards = await page.locator(CARD_SEL).all();
     for (const card of cards) {
-      // publication
-      let publication =
-        (
-          await card
-            .locator(
-              '.c-siteReviewHeader_publicationName, .c-siteReviewHeader_publisherLogo a, a[href^="/publication/"]'
-            )
-            .first()
-            .innerText()
-            .catch(() => "")
-        )?.trim() || "";
-
-      // author (siistitty + nimilogiin)
-      const authorRaw = await extractAuthorFromCard(card);
-      const author = sanitizeAuthor(authorRaw);
+      const publication = await extractPublicationFromCard(card);
+      const author = await extractAuthorFromCard(card);
 
       // score (title/aria-label preferred, fallback innerText)
       let score: number | null = null;
@@ -429,26 +464,21 @@ async function getAllCriticReviewsViaDom(page: Page, movieUrl: string) {
   await harvest();
   if (total != null && rows.length >= total) return rows;
 
-  // Infinite scroll loop driven by UNIQUE count (not #cards on screen)
+  // Infinite scroll loop driven by UNIQUE count
   let steps = 0;
   let stagnantUniqueIters = 0;
 
   while ((total == null || rows.length < total) && steps++ < MAX_REVIEW_STEPS) {
     const beforeUnique = rows.length;
 
-    // Bring last card into view and scroll container/window to trigger loaders
     try { await page.locator(CARD_SEL).last().scrollIntoViewIfNeeded({ timeout: 500 }).catch(() => {}); } catch {}
     await scrollReviewsContainer(page);
     try { await page.keyboard.press("End"); } catch {}
 
-    // Wait for new content
     await jitter(SCROLL_WAIT_MS);
     await page.waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT }).catch(() => {});
-
-    // Always harvest, even if visible card count stays ~constant (virtualized list)
     await harvest();
 
-    // If total appeared later, capture it
     if (total == null) {
       try {
         const t2 = (await page.locator(".c-pageProductReviews_text").first().innerText()).trim();
@@ -464,7 +494,6 @@ async function getAllCriticReviewsViaDom(page: Page, movieUrl: string) {
       stagnantUniqueIters = 0; // progress!
     } else {
       stagnantUniqueIters++;
-      // Try explicit "Load more / Next" controls if no new uniques
       const MORE_SELECTORS = [
         'button:has-text("Load more")',
         'button:has-text("Show more")',
@@ -484,9 +513,8 @@ async function getAllCriticReviewsViaDom(page: Page, movieUrl: string) {
         await jitter(AFTER_CLICK_WAIT_MS);
         await page.waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT }).catch(() => {});
         await harvest();
-        stagnantUniqueIters = 0; // reset after click
+        stagnantUniqueIters = 0;
       }
-
       if (stagnantUniqueIters >= MAX_STAGNANT_ITERS) break;
     }
   }
@@ -530,10 +558,10 @@ async function run() {
     const urls = await collectMovieUrlsForYear(page, year);
     console.log(`Collected ${urls.length} movie URLs (raw)`);
 
-    // detail phase: title, metascore, REAL releaseYear (closest to target year)
+    // detail phase: title, metascore, REAL releaseYear
     let done = 0;
     const details = await mapLimit(urls, DETAIL_CONCURRENCY, async (u) => {
-      const d = await readDetails(api, u, year); // <-- pass target year here
+      const d = await readDetails(api, u);
       done++;
       if (done % 10 === 0 || done === urls.length) {
         process.stdout.write(`  meta ${done}/${urls.length}\r`);
