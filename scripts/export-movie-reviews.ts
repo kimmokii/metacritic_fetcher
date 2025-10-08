@@ -312,7 +312,10 @@ function extractYearFromLdObject(obj: any): number | null {
     if (year != null) return year;
   }
 
-  // (2) Recursive search through nested objects, but skip `description`
+  // (2) Recursive search through nested objects, but skip excluded fields.
+  // We skip "description" because it often contains large text blobs or story text
+  // that may include unrelated years (e.g., “Since 2010...”), which could cause
+  // false positives or performance issues during year extraction.
   for (const [k, v] of Object.entries(obj)) {
     if (k.toLowerCase() === "description") continue;
     if (v && typeof v === "object") {
