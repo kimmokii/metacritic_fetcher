@@ -17,8 +17,8 @@ import fs from "fs";
 import path from "path";
 
 // ----------------- CONFIG -----------------
-const START_YEAR = 2015;
-const END_YEAR = 2026; // inclusive
+const START_YEAR = 2022;
+const END_YEAR = 2025; // inclusive
 const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
 
 const MAX_LIST_PAGES = 80;
@@ -338,7 +338,7 @@ async function readDetails(
 
   try {
     const resp = await api.get(movieUrl, {
-      timeout: 30000,
+      timeout: 60000,
       headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
     });
     if (resp.ok()) {
