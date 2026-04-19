@@ -69,7 +69,8 @@ ts-node scripts/merge_patched_data.ts
 
 ## Motivation
 
-Metacritic critic data is inconsistent. This toolkit provides a reproducible way to fetch data, detect missing critic metadata, patch inconsistencies, and produce a final dataset for analysis.
+Metacritic critic data is inconsistent. This toolkit provides a reproducible way to fetch data, detect missing critic metadata, patch inconsistencies, and produce a final dataset for analysis carried in 
+[metacritic_weight_analysis]([https://duckduckgo.com](https://github.com/kimmokii/metacritic_weight_analysis).
 
 ## Requirements
 
